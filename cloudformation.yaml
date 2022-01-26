@@ -1,0 +1,132 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cloud-magix/cloudformation-schema/master/cloudformation-schema-us-east-1.json
+Description: Cloudformation Template to Bootstrap CICD Deployments
+Parameters:
+  ExternalIdentityUserName:
+    Type: String
+
+  PrivilegedRoleName:
+    Type: String
+
+  SourceIdentities:
+    Type: CommaDelimitedList
+    Default: ""
+
+  ExternalId:
+    Description: |
+      You can specify the Secret External ID here
+      NOTE: This is not recommended. See SecretArn for
+      a more secure way to inject the secret
+    Type: String
+    Default: ""
+      
+  SecretArn:
+    Description: |
+      You can specify an existing SecretArn to use for External ID
+    Type: String
+    Default: ""
+    
+Conditions:
+  HasSourceIdentities: !Not [!Equals [!Join ["", !Ref SourceIdentities], ""]]
+  HasExternalId: !Not [!Equals [!Ref ExternalId, ""]]
+  DoesNotHaveSecretArn: !Equals [!Ref SecretArn, ""]
+
+Resources:
+  ExternalIdentitySecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: DoesNotHaveSecretArn
+    Properties:
+      Fn::If:
+        - HasExternalId
+        - Name: "ExternalIdentitySecret"
+          Description: |
+            This is a secret for use by trusted identities outside of AWS
+          SecretString: !Ref ExternalId
+        - Name: "ExternalIdentitySecret"
+          Description: |
+            This is a secret for use by trusted identities outside of AWS
+          GenerateSecretString:
+            ExcludePunctuation: true
+            PasswordLength: 64
+
+  ExternalIdentity:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Ref ExternalIdentityUserName
+      Policies:
+        - PolicyName: AllowAssumeRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/*"
+        - Fn::If:
+          - HasSourceIdentities
+          - PolicyName: AllowSetSourceIdentity
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - sts:SetSourceIdentity
+                  Resource:
+                    - !Sub "arn:aws:iam::${AWS::AccountId}:role/*"
+                  Condition:
+                    ForAnyValue:StringLike:
+                      sts:SourceIdentity: !Ref SourceIdentities
+          - AWS::NoValue
+
+  PrivilegedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref PrivilegedRoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt ExternalIdentity.Arn
+            Action: 
+              - sts:AssumeRole
+            Condition:
+              StringEquals:
+                "sts:ExternalId":
+                  Fn::If:
+                    - DoesNotHaveSecretArn
+                    - !Join [
+                        "",
+                        [
+                          "{{resolve:secretsmanager:",
+                          !Ref ExternalIdentitySecret,
+                          ":SecretString}}",
+                        ],
+                      ]
+                    - !Join [
+                        "",
+                        [
+                          "{{resolve:secretsmanager:",
+                          !Ref SecretArn,
+                          "}}"
+                        ],
+                      ]
+          - Fn::If:
+            - HasSourceIdentities
+            - Effect: Allow
+              Principal:
+                AWS: !GetAtt ExternalIdentity.Arn
+              Action:
+                - sts:SetSourceIdentity
+              Condition:
+                ForAnyValue:StringLike:
+                  sts:SourceIdentity: !Ref SourceIdentities
+            - AWS::NoValue
+      Policies:
+        - PolicyName: FullAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "*"
+                Resource: "*"
